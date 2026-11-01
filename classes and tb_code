@@ -1,0 +1,335 @@
+// =================================
+// INTERFACE
+// =================================
+
+interface dual_port_ram_if(input logic clk);
+
+    logic rst;
+
+    logic wr_en_a, rd_en_a;
+    logic [3:0] addr_a;
+    logic [7:0] din_a, dout_a;
+
+    logic wr_en_b, rd_en_b;
+    logic [3:0] addr_b;
+    logic [7:0] din_b, dout_b;
+
+endinterface
+
+
+// =================================
+// CONFIGURATION CLASS
+// =================================
+
+class ram_config;
+
+    int num_transactions;
+
+    function new();
+        num_transactions = 100;
+    endfunction
+
+endclass
+
+
+// =================================
+// TRANSACTION CLASS
+// =================================
+
+class ram_transaction;
+
+    rand bit wr_en_a, rd_en_a;
+    rand bit [3:0] addr_a;
+    rand bit [7:0] din_a;
+
+    rand bit wr_en_b, rd_en_b;
+    rand bit [3:0] addr_b;
+    rand bit [7:0] din_b;
+
+    constraint no_collision {
+
+        if (wr_en_a && (wr_en_b || rd_en_b))
+            addr_a != addr_b;
+
+        if (wr_en_b && rd_en_a)
+            addr_a != addr_b;
+    }
+
+endclass
+
+
+// =================================
+// DRIVER CLASS
+// =================================
+
+class ram_driver;
+
+    virtual dual_port_ram_if vif;
+
+    function new(virtual dual_port_ram_if vif);
+        this.vif = vif;
+    endfunction
+
+    task drive(ram_transaction tr);
+
+        @(negedge vif.clk);
+
+        vif.wr_en_a = tr.wr_en_a;
+        vif.rd_en_a = tr.rd_en_a;
+        vif.addr_a  = tr.addr_a;
+        vif.din_a   = tr.din_a;
+
+        vif.wr_en_b = tr.wr_en_b;
+        vif.rd_en_b = tr.rd_en_b;
+        vif.addr_b  = tr.addr_b;
+        vif.din_b   = tr.din_b;
+
+    endtask
+
+endclass
+
+
+// =================================
+// SCOREBOARD CLASS
+// =================================
+
+class ram_scoreboard;
+
+    virtual dual_port_ram_if vif;
+
+    bit [7:0] model [0:15];
+
+    bit [7:0] expected_a;
+    bit [7:0] expected_b;
+
+    function new(virtual dual_port_ram_if vif);
+        this.vif = vif;
+    endfunction
+
+    task run();
+
+        integer i;
+
+        for (i = 0; i < 16; i = i + 1)
+            model[i] = 0;
+
+        forever begin
+
+            @(posedge vif.clk);
+            #1;
+
+            if (vif.rst) begin
+
+                for (i = 0; i < 16; i = i + 1)
+                    model[i] = 0;
+
+            end
+
+            else begin
+
+                if (vif.rd_en_a) begin
+
+                    if (vif.wr_en_a)
+                        expected_a = vif.din_a;
+                    else
+                        expected_a = model[vif.addr_a];
+
+                    if (vif.dout_a !== expected_a)
+                        $error("PORT A FAIL: Expected=%h Actual=%h",
+                               expected_a, vif.dout_a);
+                    else
+                        $display("PORT A PASS: DATA=%h",
+                                 vif.dout_a);
+
+                end
+
+                if (vif.rd_en_b) begin
+
+                    if (vif.wr_en_b)
+                        expected_b = vif.din_b;
+                    else
+                        expected_b = model[vif.addr_b];
+
+                    if (vif.dout_b !== expected_b)
+                        $error("PORT B FAIL: Expected=%h Actual=%h",
+                               expected_b, vif.dout_b);
+                    else
+                        $display("PORT B PASS: DATA=%h",
+                                 vif.dout_b);
+
+                end
+
+                if (vif.wr_en_a)
+                    model[vif.addr_a] = vif.din_a;
+
+                if (vif.wr_en_b)
+                    model[vif.addr_b] = vif.din_b;
+
+            end
+
+        end
+
+    endtask
+
+endclass
+
+
+// =================================
+// ENVIRONMENT CLASS
+// =================================
+
+class ram_environment;
+
+    ram_driver drv;
+    ram_scoreboard sb;
+
+    virtual dual_port_ram_if vif;
+
+    ram_config cfg;
+
+    function new(
+        virtual dual_port_ram_if vif,
+        ram_config cfg
+    );
+
+        this.vif = vif;
+        this.cfg = cfg;
+
+        drv = new(vif);
+        sb = new(vif);
+
+    endfunction
+
+    task run();
+
+        ram_transaction tr;
+
+        fork
+
+            sb.run();
+
+            begin
+
+                repeat (cfg.num_transactions) begin
+
+                    tr = new();
+
+                    if (!tr.randomize())
+                        $fatal(1, "Randomization failed");
+
+                    drv.drive(tr);
+
+                end
+
+                @(posedge vif.clk);
+                #2;
+
+            end
+
+        join_any
+
+        disable fork;
+
+    endtask
+
+endclass
+
+
+// =================================
+// TEST CLASS
+// =================================
+
+class ram_test;
+
+    ram_config cfg;
+    ram_environment env;
+
+    virtual dual_port_ram_if vif;
+
+    function new(virtual dual_port_ram_if vif);
+
+        this.vif = vif;
+
+        cfg = new();
+        env = new(vif, cfg);
+
+    endfunction
+
+    task run();
+
+        $display("========== TEST STARTED ==========");
+
+        env.run();
+
+        $display("========== TEST COMPLETED ==========");
+
+    endtask
+
+endclass
+
+
+// =================================
+// TOP MODULE
+// =================================
+
+module tb_top;
+
+    logic clk;
+
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk;
+    end
+
+    dual_port_ram_if intf(clk);
+
+    dual_port_ram dut (
+
+        .clk(clk),
+        .rst(intf.rst),
+
+        .wr_en_a(intf.wr_en_a),
+        .rd_en_a(intf.rd_en_a),
+        .addr_a(intf.addr_a),
+        .din_a(intf.din_a),
+        .dout_a(intf.dout_a),
+
+        .wr_en_b(intf.wr_en_b),
+        .rd_en_b(intf.rd_en_b),
+        .addr_b(intf.addr_b),
+        .din_b(intf.din_b),
+        .dout_b(intf.dout_b)
+
+    );
+
+    ram_test test;
+
+    initial begin
+
+        intf.rst = 1;
+
+        intf.wr_en_a = 0;
+        intf.rd_en_a = 0;
+        intf.addr_a = 0;
+        intf.din_a = 0;
+
+        intf.wr_en_b = 0;
+        intf.rd_en_b = 0;
+        intf.addr_b = 0;
+        intf.din_b = 0;
+
+        repeat (2) @(negedge clk);
+
+        intf.rst = 0;
+
+        test = new(intf);
+
+        test.run();
+
+        $display("========== SIMULATION FINISHED ==========");
+
+        $finish;
+
+    end
+
+endmodule
